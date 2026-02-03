@@ -43,7 +43,8 @@ from sqaTerm import  \
   removeVirtOps_sf,  \
   sortOps,           \
   term,              \
-  termChop
+  termChop,          \
+  braketEval
 
 from sqaNormalOrder import \
   normalOrder,             \

@@ -19,7 +19,7 @@
 import threading
 from sqaIndex import index
 from sqaTensor import tensor, kroneckerDelta, sfExOp, creOp, desOp, creDesTensor
-from sqaMisc import makePermutations
+from sqaMisc import makePermutations, makeTuples, allDifferent
 from sqaOptions import options
 import time
 
@@ -209,23 +209,13 @@ class term:
     i = 0
     while i < len(self.tensors):
       t = self.tensors[i]
-
-#      print t
-#      print "****************************"
-#      if isinstance(t, kroneckerDelta):
-#        i0 = t.indices[0]
-#        i1 = t.indices[1]
-#        print i0.indType
-#        print i1.indType
       
       # If the term is a delta funciton with a repeated index, remove it
       if isinstance(t, kroneckerDelta) and (t.indices[0] == t.indices[1]):
-#        print "2 ****************************"
         del(self.tensors[i])
 
-      # If the term is a delta funciton with contractable indices, contract them and remove the delta func
-      elif isinstance(t, kroneckerDelta) and (t.indices[0].isSummed or t.indices[1].isSummed):
-#        print "3 ****************************"
+      # If the term is a delta funciton, colapse it if possible. Contract dummy indices
+      elif isinstance(t, kroneckerDelta):
         i0 = t.indices[0]
         i1 = t.indices[1]
 
@@ -254,20 +244,27 @@ class term:
           self.numConstant = 0.0
           return
 
-        # Create the new index
-        if not i0.isSummed:
-          newIndex = index(i0.name, typeOverlap, i0.isSummed)
-        else:
-          newIndex = index(i1.name, typeOverlap, i1.isSummed)
+        # Contract the indices
+        if i0.isSummed or i1.isSummed:
 
-        # Remove the delta function
-        del(self.tensors[i])
+          # Create the new index
+          if not i0.isSummed:
+            newIndex = index(i0.name, typeOverlap, i0.isSummed)
+          else:
+            newIndex = index(i1.name, typeOverlap, i1.isSummed)
 
-        # Excecute the index replacement
-        for ten in self.tensors:
-          for j in range(len(ten.indices)):
-            if ten.indices[j] in [i0,i1]:
-              ten.indices[j] = newIndex.copy()
+          # Remove the delta function
+          del(self.tensors[i])
+          i -= 1
+
+          # Excecute the index replacement
+          for ten in self.tensors:
+            for j in range(len(ten.indices)):
+              if ten.indices[j] in [i0,i1]:
+                ten.indices[j] = newIndex.copy()
+
+        # Go to the next delta
+        i += 1
 
       # Otherwise move on to the next tensor
       else:
@@ -1563,5 +1560,194 @@ def removeVirtOps_sf(inList):
 
 
 #--------------------------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------------------------
 
 
+def braketEval (terms):
+  """
+  terms must be a list of terms in normal order.
+  Evaluates each term with the ground state closed-shell wave function <gs|terms|gs>
+  It removes terms that delete electrons from unoccupied MOs but it makes nothing to cre/des
+  ops acting on the active space.
+  terms is modified on exit
+  """
+
+  if type(terms) != type([]) or not isinstance(terms[0], term):
+    raise TypeError, "inList must be a list of sqa terms"
+
+  print("")
+  print("Removing terms that destroy electrons from unoccupied MOs")
+
+  # Iterate over terms in the list
+  i = 0
+  for t in terms:
+
+    # If the number of cre/des operators is not the same, the term vanishes
+    if t.nCreOps() != t.nDesOps():
+      terms[i].numConstant = 0.0
+
+    # Because we use the ground state as bra and ket, 
+    # the terms with cre(virtual) or des(virtual) vanish
+    for op in t.tensors:
+      if isinstance(op, creOp) or isinstance(op, desOp):
+        if (options.virtual_type in op.indices[0].indType) and \
+           ((not options.core_type in op.indices[0].indType) and \
+           (not options.active_type in op.indices[0].indType)):
+          terms[i].numConstant = 0.0
+          continue
+ 
+    i += 1
+
+  # Remove terms with 0 coefficient
+  termChop(terms)
+
+  print("Move annihilation operators with non-dymmy indices to the left")
+  # Iterate over terms in the list
+  i = 0
+  outTerms = []
+  for t in terms:
+
+    # Separate cre/des operators from other tensors
+    ops = []
+    nonOps = []
+    for op in t.tensors:
+      if isinstance(op, creOp) or isinstance(op, desOp):
+        ops.append(op.copy())
+      else:
+        nonOps.append(op.copy())
+
+    # Generate all contraction pairs
+    contractionPairs = []
+    for iop in range(1,len(ops)):
+      rop = ops[iop]
+      # Skip creation operators and operators with dummy indices
+      if ( rop.indices[0].isSummed or isinstance(rop, creOp) ) or \
+         ( not options.core_type in rop.indices[0].indType and \
+           not options.active_type in rop.indices[0].indType):
+        continue
+      for jop in range(iop-1,-1,-1):
+        lop = ops[jop]
+        # Ignore destruction operators with active or closed-shell indices
+        if lop.indices[0].isSummed or isinstance(lop, creOp) or \
+           ( not options.core_type in lop.indices[0].indType and \
+             not options.active_type in lop.indices[0].indType):
+          contractionPairs.append((jop,iop));
+
+    # Determine maximum contraction order
+    creCount = 0
+    maxConOrder = 0
+    for iop in range(len(ops)):
+      lop = ops[iop]
+      move = isinstance(lop,desOp) and \
+             (options.core_type in lop.indices[0].indType or \
+             options.active_type in lop.indices[0].indType)
+      if not move:
+        creCount +=1
+      elif move and creCount > 0:
+        maxConOrder += 1
+        creCount -= 1
+    del(creCount,lop)
+
+    # Generate all contractions
+    contractions = []
+    for iord in range(maxConOrder+1):
+      subCons = makeTuples(iord,contractionPairs)
+      jord = 0
+      while jord < len(subCons):
+        creOpTags = []
+        desOpTags = []
+        for k in range(iord):
+          creOpTags.append(subCons[jord][k][1])
+          desOpTags.append(subCons[jord][k][0])
+        if allDifferent(creOpTags) and allDifferent(desOpTags):
+          jord += 1
+        else:
+          del(subCons[jord])
+      for jord in range(len(subCons)):
+        contractions.append(subCons[jord])
+    del(subCons,creOpTags,desOpTags,contractionPairs)
+
+    # For each contraction, generate the resulting term
+    for contraction in contractions:
+      conSign = 1
+      deltaFuncs = []
+      conIndeces = []
+      subOpString = []
+      subOpString.extend(ops)
+      for conPair in contraction:
+        index1 = ops[conPair[0]].indices[0]
+        index2 = ops[conPair[1]].indices[0]
+        deltaFuncs.append(kroneckerDelta([index1,index2]))
+        subOpString[conPair[0]] = 'contracted'
+        subOpString[conPair[1]] = 'contracted'
+        for q in subOpString[conPair[0]+1:conPair[1]]:
+          if not (q is 'contracted'):
+            conSign *= -1
+      iterm = 0
+      while iterm < len(subOpString):
+        if subOpString[iterm] is 'contracted':
+          del(subOpString[iterm])
+        else:
+          iterm += 1
+      # Generate permutations with permutation sign of all the terms
+      # according to the contraction
+      # In which position is the operator to be moved?
+      #(sortSign,sortedOps) = sortOps(subOpString)
+      sortedOps = subOpString + []
+      i = 0
+      sortSign = 1
+      # Loop by pairs of operators, (left operator ,right operator)
+      while i < len(sortedOps)-1:
+        # Do we need to move the right operator to the left?
+        move_rop_left = isinstance(sortedOps[i+1],desOp) and \
+             (options.core_type in sortedOps[i+1].indices[0].indType or \
+             options.active_type in sortedOps[i+1].indices[0].indType)
+        # Can we move the left operator to the right?
+        move_lop_right = not (isinstance(sortedOps[i],desOp) and \
+             (options.core_type in sortedOps[i].indices[0].indType or \
+             options.active_type in sortedOps[i].indices[0].indType))
+        # Swap them if needed and update permutation sign
+        if move_lop_right and move_rop_left:
+          temp = sortedOps[i]
+          sortedOps[i] = sortedOps[i+1]
+          sortedOps[i+1] = temp
+          i = 0
+          sortSign *= -1
+        else:
+          i += 1
+
+      totalSign = conSign * sortSign
+      outTensors = []
+      outTensors.extend(nonOps)
+      outTensors.extend(deltaFuncs)
+      outTensors.extend(sortedOps)
+      outTerms.append( term(totalSign * t.numConstant, t.constants, outTensors) )
+
+  print("Removing terms with annihilation operators acting on occupied MOs on the bra")
+  # Iterate over terms in the list
+  i = 0
+  for t in outTerms:
+
+    # Because we use the ground state as bra and ket, 
+    # the terms with des(occ) on the left vanish 
+    for op in t.tensors:
+      # Check only the left most operator
+      if isinstance(op, creOp) or isinstance(op, desOp):
+        if (isinstance(op, desOp) and \
+           ((options.core_type in op.indices[0].indType or \
+             options.active_type in op.indices[0].indType) and \
+            not options.virtual_type in op.indices[0].indType)):
+          outTerms[i].numConstant = 0.0
+      continue
+ 
+    i += 1
+
+  print("Colapsing delta functions")
+  for t in outTerms:
+    t.contractDeltaFuncs()
+  termChop(outTerms)
+  combineTerms(outTerms)
+
+  return(outTerms)
+
+#--------------------------------------------------------------------------------------------------
