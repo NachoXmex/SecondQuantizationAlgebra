@@ -43,7 +43,9 @@ from sqaTerm import  \
   removeVirtOps_sf,  \
   sortOps,           \
   term,              \
-  termChop,          \
+  termChop
+
+from sqaBraketEval import \
   braketEval
 
 from sqaNormalOrder import \
