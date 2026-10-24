@@ -15,7 +15,7 @@ jobs:
         env:
           GITLAB_TOKEN: ${{ secrets.UZH_GITLAB }}
         run: |
-          git remote add gitlab "https://oauth2:${UZH_GITLAB}@gitlab.uzh.ch/lubergroup/second-quantization.git"
+          git remote add gitlab "https://oauth2:${GITLAB_TOKEN}@gitlab.uzh.ch/lubergroup/second-quantization.git"
           git push --prune gitlab \
             "refs/remotes/origin/*:refs/heads/*" \
             "refs/tags/*:refs/tags/*"
