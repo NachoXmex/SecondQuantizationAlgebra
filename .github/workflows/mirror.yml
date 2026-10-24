@@ -1,0 +1,21 @@
+name: Mirror to GitLab
+on:
+  push:
+  delete:
+  workflow_dispatch:
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Push to GitLab
+        env:
+          GITLAB_TOKEN: ${{ secrets.UZH_GITLAB }}
+        run: |
+          git remote add gitlab "https://oauth2:${UZH_GITLAB}@gitlab.uzh.ch/lubergroup/second-quantization.git"
+          git push --prune gitlab \
+            "refs/remotes/origin/*:refs/heads/*" \
+            "refs/tags/*:refs/tags/*"
